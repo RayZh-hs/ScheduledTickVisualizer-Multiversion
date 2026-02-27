@@ -23,18 +23,18 @@ on:
         required: true
 
 jobs:
-  # Only release from the main branch (for tag pushes)
+  # Only release from the master branch (for tag pushes)
   check_branch:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Ensure tag is on main
+      - name: Ensure tag is on master
         if: ${{ github.event_name == 'push' }}
         run: |
-          if ! git branch -r --contains ${{ github.sha }} | grep -q 'origin/main'; then
-            echo "::error::Tag ${{ github.ref_name }} is not on the main branch. Aborting release."
+          if ! git branch -r --contains ${{ github.sha }} | grep -q 'origin/master'; then
+            echo "::error::Tag ${{ github.ref_name }} is not on the master branch. Aborting release."
             exit 1
           fi
 
