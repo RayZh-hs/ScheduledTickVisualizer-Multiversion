@@ -1,20 +1,18 @@
 name: Release
 
-# release: <default> (release title)
-# dispatch (all): Manual release for $target_release_tag
-# dispatch (specified): Manual release for $target_release_tag (subproject: $target_subproject)
+# Triggered when a v* tag is pushed, or manually via workflow_dispatch
 run-name: |-
   ${{ github.event_name == 'workflow_dispatch' && format('Manual release for {0}{1}', inputs.target_release_tag, inputs.target_subproject && format(' (subproject: {0})', inputs.target_subproject) || '') || '' }}
 
 on:
-  release:
-    types:
-      - published
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       target_subproject:
         description: |-
-          The subproject name(s) of the specified Minecraft version to be released, seperated with ",".
+          The subproject name(s) of the specified Minecraft version to be released, separated with ",".
           By default all subprojects will be released
         type: string
         required: false
@@ -24,41 +22,48 @@ on:
         type: string
         required: true
 
-
 jobs:
-  show_action_parameters:
+  # Only release from the main branch (for tag pushes)
+  check_branch:
     runs-on: ubuntu-latest
     steps:
-      - name: Show action parameters
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Ensure tag is on main
+        if: ${{ github.event_name == 'push' }}
         run: |
-          cat <<EOF > $GITHUB_STEP_SUMMARY
-          ## Action Parameters
-          - target_subproject: \`${{ github.event.inputs.target_subproject }}\`
-          - target_release_tag: \`${{ github.event.inputs.target_release_tag }}\`
-          EOF
+          if ! git branch -r --contains ${{ github.sha }} | grep -q 'origin/main'; then
+            echo "::error::Tag ${{ github.ref_name }} is not on the main branch. Aborting release."
+            exit 1
+          fi
+
+  # Ensure the manually-provided release tag is valid
+  validate_release:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get github release information
+        uses: cardinalby/git-get-release-action@1.2.5
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          tag: ${{ inputs.target_release_tag }}
 
   matrix_prep:
     uses: ./.github/workflows/matrix_prep.yml
     with:
       target_subproject: ${{ github.event.inputs.target_subproject }}
 
-  # ensure the input release tag is valid
-  validate_release:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Get github release information
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: cardinalby/git-get-release-action@1.2.5
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        with:
-          tag: ${{ github.event.inputs.target_release_tag }}
-
   build:
     uses: ./.github/workflows/build.yml
     secrets: inherit
     needs:
+      - check_branch
       - validate_release
+    # Run even if validate_release is skipped (tag push) — only check_branch is required
+    if: |
+      !failure() && !cancelled()
     with:
       target_subproject: ${{ github.event.inputs.target_subproject }}
       release: true
@@ -69,8 +74,6 @@ jobs:
       - build
     runs-on: ubuntu-latest
 
-    # allow the mod publish step to add asserts to release
-    # https://docs.github.com/en/actions/security-guides/automatic-token-authentication#permissions-for-the-github_token
     permissions:
       contents: write
 
@@ -83,14 +86,9 @@ jobs:
       - name: Display context
         run: |
           echo ref_name = ${{ github.ref_name }}
+          echo event_name = ${{ github.event_name }}
           echo target_subproject = ${{ github.event.inputs.target_subproject }}
           echo target_release_tag = ${{ github.event.inputs.target_release_tag }}
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: build-artifacts
-          path: build-artifacts
 
       - name: Get github release information
         if: ${{ github.event_name == 'workflow_dispatch' }}
@@ -99,18 +97,17 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
-          tag: ${{ github.event.inputs.target_release_tag }}
+          tag: ${{ inputs.target_release_tag }}
 
       - name: Generate publish related information
         id: release_info
         run: |
-          if [ $GITHUB_EVENT_NAME == 'release' ]
+          if [ $GITHUB_EVENT_NAME == 'push' ]
           then
-              # Leave an empty value here, so Kir-Antipov/mc-publish will infer the tag from the action context
-              echo "tag_name=" >> $GITHUB_OUTPUT
+              echo "tag_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
           elif [ $GITHUB_EVENT_NAME == 'workflow_dispatch' ]
           then
-              echo "tag_name=${{ github.event.inputs.target_release_tag }}" >> $GITHUB_OUTPUT
+              echo "tag_name=${{ inputs.target_release_tag }}" >> $GITHUB_OUTPUT
           else
               echo Unknown github event name $GITHUB_EVENT_NAME
               exit 1
@@ -130,6 +127,12 @@ jobs:
           file: ${{ format('versions/{0}/gradle.properties', matrix.subproject) }}
           all: true
 
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+          path: build-artifacts
+
       - name: Prepare file information
         id: file_info
         run: |
@@ -141,7 +144,7 @@ jobs:
           else
               FILE_PATH=${FILE_PATHS[0]}
           fi
-          
+
           FILE_NAME=$(basename $FILE_PATH)
           FILE_HASH=$(sha256sum $FILE_PATH | awk '{ print $1 }')
           echo "path=$FILE_PATH" >> $GITHUB_OUTPUT
@@ -170,13 +173,15 @@ jobs:
       - name: Publish Minecraft Mods
         uses: Kir-Antipov/mc-publish@v3.3
         with:
-          # https://modrinth.com/settings/pats
+          # Modrinth — only publishes if MODRINTH_TOKEN secret is set
           modrinth-id: 4bMS6SlB
-          modrinth-token: ${{ secrets.MODRINTH_TOKEN  }}
-          # https://legacy.curseforge.com/account/api-tokens
-#          curseforge-id: 314159
-#          curseforge-token: ${{ secrets.CF_API_TOKEN }}
+          modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
 
+          # CurseForge — only publishes if CF_API_TOKEN secret is set
+          curseforge-id: ${{ secrets.CF_PROJECT_ID }}
+          curseforge-token: ${{ secrets.CF_API_TOKEN }}
+
+          # GitHub Release — always publishes (GITHUB_TOKEN is always available)
           github-tag: ${{ steps.release_info.outputs.tag_name }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
