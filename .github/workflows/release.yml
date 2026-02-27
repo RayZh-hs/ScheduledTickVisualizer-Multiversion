@@ -72,6 +72,9 @@ jobs:
     needs:
       - matrix_prep
       - build
+    # Run even if validate_release (a transitive dependency via build) is skipped
+    if: |
+      !failure() && !cancelled()
     runs-on: ubuntu-latest
 
     permissions:
