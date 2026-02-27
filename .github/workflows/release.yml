@@ -68,6 +68,128 @@ jobs:
       target_subproject: ${{ github.event.inputs.target_subproject }}
       release: true
 
+  github_release:
+    needs:
+      - matrix_prep
+      - build
+    # Run even if validate_release (a transitive dependency via build) is skipped
+    if: |
+      !failure() && !cancelled()
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get github release information
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        id: get_release
+        uses: cardinalby/git-get-release-action@1.2.5
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          tag: ${{ inputs.target_release_tag }}
+
+      - name: Generate publish related information
+        id: release_info
+        run: |
+          if [ $GITHUB_EVENT_NAME == 'push' ]
+          then
+              echo "tag_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          elif [ $GITHUB_EVENT_NAME == 'workflow_dispatch' ]
+          then
+              echo "tag_name=${{ inputs.target_release_tag }}" >> $GITHUB_OUTPUT
+          else
+              echo Unknown github event name $GITHUB_EVENT_NAME
+              exit 1
+          fi
+
+      - name: Read common properties
+        id: properties_g
+        uses: BrycensRanch/read-properties-action@v1
+        with:
+          file: gradle.properties
+          all: true
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+          path: build-artifacts
+
+      - name: Collect files and generate build info
+        id: collect
+        run: |
+          shopt -s extglob
+          mkdir -p release-files
+
+          MATRIX='${{ needs.matrix_prep.outputs.matrix }}'
+          SUBPROJECTS=$(echo "$MATRIX" | jq -r '.include[].subproject' | sort -V)
+
+          # Determine version range for release title
+          FIRST_VERSION=$(echo "$SUBPROJECTS" | head -1)
+          LAST_VERSION=$(echo "$SUBPROJECTS" | tail -1)
+          VERSION_COUNT=$(echo "$SUBPROJECTS" | wc -l)
+          if [ "$VERSION_COUNT" -eq 1 ]; then
+            echo "version_range=mc${FIRST_VERSION}" >> $GITHUB_OUTPUT
+          else
+            echo "version_range=mc${FIRST_VERSION} – mc${LAST_VERSION}" >> $GITHUB_OUTPUT
+          fi
+
+          # Build the file info table
+          TABLE_FILE=$(mktemp)
+          echo "| Version | File | SHA-256 |" >> "$TABLE_FILE"
+          echo "|---|---|---|" >> "$TABLE_FILE"
+
+          for subproject in $SUBPROJECTS; do
+            FILE_PATHS=(build-artifacts/${subproject}/build/libs/!(*-@(dev|sources|shadow)).jar)
+            if (( ${#FILE_PATHS[@]} != 1 )); then
+              echo "::error::Found ${#FILE_PATHS[@]} files for ${subproject}, expected exactly 1"
+              exit 1
+            fi
+            FILE_PATH="${FILE_PATHS[0]}"
+            FILE_NAME=$(basename "$FILE_PATH")
+            FILE_HASH=$(sha256sum "$FILE_PATH" | awk '{ print $1 }')
+            cp "$FILE_PATH" release-files/
+            echo "| mc${subproject} | \`${FILE_NAME}\` | \`${FILE_HASH}\` |" >> "$TABLE_FILE"
+          done
+
+          # Write table to output using heredoc delimiter
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          {
+            echo "build_table<<$EOF"
+            cat "$TABLE_FILE"
+            echo "$EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Prepare changelog
+        uses: actions/github-script@v7
+        id: changelog
+        with:
+          script: return process.env.CHANGELOG
+          result-encoding: string
+        env:
+          CHANGELOG: |-
+            ${{ format('{0}{1}', github.event.release.body, steps.get_release.outputs.body) }}
+
+            -------
+
+            Build Information
+
+            ${{ steps.collect.outputs.build_table }}
+
+            - Built from: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+      - name: Publish to GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_info.outputs.tag_name }}
+          name: ${{ format('{0} v{1} ({2})', steps.properties_g.outputs.mod_name, steps.properties_g.outputs.mod_version, steps.collect.outputs.version_range) }}
+          body: ${{ steps.changelog.outputs.result }}
+          files: release-files/*.jar
+
   release:
     needs:
       - matrix_prep
@@ -108,20 +230,6 @@ jobs:
         with:
           tag: ${{ inputs.target_release_tag }}
 
-      - name: Generate publish related information
-        id: release_info
-        run: |
-          if [ $GITHUB_EVENT_NAME == 'push' ]
-          then
-              echo "tag_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-          elif [ $GITHUB_EVENT_NAME == 'workflow_dispatch' ]
-          then
-              echo "tag_name=${{ inputs.target_release_tag }}" >> $GITHUB_OUTPUT
-          else
-              echo Unknown github event name $GITHUB_EVENT_NAME
-              exit 1
-          fi
-
       - name: Read common properties
         id: properties_g
         uses: BrycensRanch/read-properties-action@v1
@@ -142,6 +250,7 @@ jobs:
           name: build-artifacts
           path: build-artifacts
 
+      # Necessary before publishing in external websites
       - name: Prepare file information
         id: file_info
         run: |
@@ -161,48 +270,7 @@ jobs:
           echo "hash=$FILE_HASH" >> $GITHUB_OUTPUT
           cat $GITHUB_OUTPUT
 
-      - name: Prepare changelog
-        uses: actions/github-script@v7
-        id: changelog
-        with:
-          script: return process.env.CHANGELOG
-          result-encoding: string
-        env:
-          CHANGELOG: |-
-            ${{ format('{0}{1}', github.event.release.body, steps.get_release.outputs.body) }}
-            
-            -------
-            
-            Build Information
-            
-            - File name: `${{ steps.file_info.outputs.name }}`
-            - SHA-256: `${{ steps.file_info.outputs.hash }}`
-            - Built from: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-      # --- Publishing: GitHub Release (always) ---
-      - name: Publish to GitHub
-        uses: Kir-Antipov/mc-publish@v3.3
-        with:
-          github-tag: ${{ steps.release_info.outputs.tag_name }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-          files: ${{ steps.file_info.outputs.path }}
-
-          name: ${{ format('{0} v{1} for mc{2}', steps.properties_g.outputs.mod_name, steps.properties_g.outputs.mod_version, steps.properties_v.outputs.minecraft_version) }}
-          version: ${{ format('v{1}-mc{0}', steps.properties_v.outputs.minecraft_version, steps.properties_g.outputs.mod_version) }}
-          version-type: release
-
-          loaders: fabric
-          game-versions: ${{ steps.properties_v.outputs.game_versions }}
-          game-version-filter: any
-          dependencies: ''  # declare explicitly so mc-publish won't load from fabric.mod.json
-
-          changelog: ${{ steps.changelog.outputs.result }}
-
-          retry-attempts: 3
-          retry-delay: 10000
-
-      # --- Publishing: Modrinth (only if secret is set) ---
+      # Publishing: Modrinth (only if secret is set)
       - name: Publish to Modrinth
         if: ${{ env.MODRINTH_TOKEN != '' }}
         uses: Kir-Antipov/mc-publish@v3.3
@@ -226,7 +294,7 @@ jobs:
           retry-attempts: 3
           retry-delay: 10000
 
-      # --- Publishing: CurseForge (only if secret is set) ---
+      # Publishing: CurseForge (only if secret is set)
       - name: Publish to CurseForge
         if: ${{ env.CF_API_TOKEN != '' }}
         uses: Kir-Antipov/mc-publish@v3.3
