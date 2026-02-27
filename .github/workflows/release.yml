@@ -80,6 +80,12 @@ jobs:
     permissions:
       contents: write
 
+    # Expose secrets as env vars so they can be checked in step-level `if` conditions
+    env:
+      MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
+      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      CF_PROJECT_ID: ${{ secrets.CF_PROJECT_ID }}
+
     strategy:
       matrix: ${{ fromJson(needs.matrix_prep.outputs.matrix) }}
 
@@ -173,18 +179,10 @@ jobs:
             - SHA-256: `${{ steps.file_info.outputs.hash }}`
             - Built from: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-      - name: Publish Minecraft Mods
+      # --- Publishing: GitHub Release (always) ---
+      - name: Publish to GitHub
         uses: Kir-Antipov/mc-publish@v3.3
         with:
-          # Modrinth — only publishes if MODRINTH_TOKEN secret is set
-          modrinth-id: 4bMS6SlB
-          modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
-
-          # CurseForge — only publishes if CF_API_TOKEN secret is set
-          curseforge-id: ${{ secrets.CF_PROJECT_ID }}
-          curseforge-token: ${{ secrets.CF_API_TOKEN }}
-
-          # GitHub Release — always publishes (GITHUB_TOKEN is always available)
           github-tag: ${{ steps.release_info.outputs.tag_name }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -197,11 +195,57 @@ jobs:
           loaders: fabric
           game-versions: ${{ steps.properties_v.outputs.game_versions }}
           game-version-filter: any
-          dependencies: ''  # declare the dependencies explicitly, so mc-publish won't try to load from fabric.mod.json
+          dependencies: ''  # declare explicitly so mc-publish won't load from fabric.mod.json
 
-          github-changelog: ${{ format('{0}{1}', github.event.release.body, steps.get_release.outputs.body) }}
-          modrinth-changelog: ${{ steps.changelog.outputs.result }}
-          curseforge-changelog: ${{ steps.changelog.outputs.result }}
+          changelog: ${{ steps.changelog.outputs.result }}
+
+          retry-attempts: 3
+          retry-delay: 10000
+
+      # --- Publishing: Modrinth (only if secret is set) ---
+      - name: Publish to Modrinth
+        if: ${{ env.MODRINTH_TOKEN != '' }}
+        uses: Kir-Antipov/mc-publish@v3.3
+        with:
+          modrinth-id: 4bMS6SlB
+          modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
+
+          files: ${{ steps.file_info.outputs.path }}
+
+          name: ${{ format('{0} v{1} for mc{2}', steps.properties_g.outputs.mod_name, steps.properties_g.outputs.mod_version, steps.properties_v.outputs.minecraft_version) }}
+          version: ${{ format('v{1}-mc{0}', steps.properties_v.outputs.minecraft_version, steps.properties_g.outputs.mod_version) }}
+          version-type: release
+
+          loaders: fabric
+          game-versions: ${{ steps.properties_v.outputs.game_versions }}
+          game-version-filter: any
+          dependencies: ''
+
+          changelog: ${{ steps.changelog.outputs.result }}
+
+          retry-attempts: 3
+          retry-delay: 10000
+
+      # --- Publishing: CurseForge (only if secret is set) ---
+      - name: Publish to CurseForge
+        if: ${{ env.CF_API_TOKEN != '' }}
+        uses: Kir-Antipov/mc-publish@v3.3
+        with:
+          curseforge-id: ${{ secrets.CF_PROJECT_ID }}
+          curseforge-token: ${{ secrets.CF_API_TOKEN }}
+
+          files: ${{ steps.file_info.outputs.path }}
+
+          name: ${{ format('{0} v{1} for mc{2}', steps.properties_g.outputs.mod_name, steps.properties_g.outputs.mod_version, steps.properties_v.outputs.minecraft_version) }}
+          version: ${{ format('v{1}-mc{0}', steps.properties_v.outputs.minecraft_version, steps.properties_g.outputs.mod_version) }}
+          version-type: release
+
+          loaders: fabric
+          game-versions: ${{ steps.properties_v.outputs.game_versions }}
+          game-version-filter: any
+          dependencies: ''
+
+          changelog: ${{ steps.changelog.outputs.result }}
 
           retry-attempts: 3
           retry-delay: 10000
