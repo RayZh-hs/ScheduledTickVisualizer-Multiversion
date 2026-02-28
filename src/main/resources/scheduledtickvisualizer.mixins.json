@@ -11,6 +11,6 @@
   },
   "client": [
     "ClientPlayNetworkHandlerMixin",
-    "WorldRendererMixin",
+    "WorldRendererMixin"
   ]
 }

@@ -5,11 +5,13 @@
 	"name": "ScheduledTickVisualizer",
 	"description": "A scheduled tick visualizer mod.",
 	"authors": [
-		"Ryan100c"
+		"Ryan100c",
+		"Hotpad100c",
+		"RayZh-hs"
 	],
 	"contact": {
-		"homepage": "https://github.com/hotpad100c/scheduledtickvisulizer",
-		"sources": "https://github.com/hotpad100c/scheduledtickvisulizer"
+		"homepage": "https://github.com/RayZh-hs/ScheduledTickVisualizer-Multiversion/",
+		"sources": "https://github.com/RayZh-hs/ScheduledTickVisualizer-Multiversion/"
 	},
 	"license": "CC0-1.0",
 	"icon": "assets/scheduledtickvisualizer/icon.png",
